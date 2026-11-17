@@ -46,12 +46,24 @@ These go in `tmux.conf`. They are written for `mode-keys vi`; with emacs keys, u
 
 ``` shell
 # keep the selection and stay in copy mode when the mouse button is released,
-# and start over on a new click
-bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-selection-no-clear
+# and start over on a new click.
+# when the button is released on the top or bottom row, also stop the
+# autoscroll, which would otherwise keep running for as long as copy mode lasts
+bind-key -T copy-mode-vi MouseDragEnd1Pane {
+  send-keys -X copy-selection-no-clear
+  if -F '#{||:#{==:#{copy_cursor_y},0},#{==:#{copy_cursor_y},#{e|-:#{pane_height},1}}}' {
+    send-keys -X stop-selection
+    if -F '#{==:#{copy_cursor_y},0}' {
+      send-keys -X cursor-down
+    } {
+      send-keys -X cursor-up
+    }
+  }
+}
 bind-key -T copy-mode-vi MouseDown1Pane select-pane \; send-keys -X clear-selection
 
 # double click selects a word, triple click selects a line, both stay in copy mode
-bind-key -T root DoubleClick1Pane {
+bind-key -T root SecondClick1Pane {
   select-pane -t =
   if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' {
     send-keys -M
@@ -71,20 +83,33 @@ bind-key -T root TripleClick1Pane {
     send-keys -X copy-pipe-no-clear
   }
 }
-bind-key -T copy-mode-vi DoubleClick1Pane select-pane \; send-keys -X select-word \; send-keys -X copy-pipe-no-clear
+bind-key -T copy-mode-vi SecondClick1Pane select-pane \; send-keys -X select-word \; send-keys -X copy-pipe-no-clear
 bind-key -T copy-mode-vi TripleClick1Pane select-pane \; send-keys -X select-line \; send-keys -X copy-pipe-no-clear
 
-# tmux 3.8 workaround: re-apply the word or line selection mode
-# that begin-selection has just reset to char
+# the default DoubleClick bindings select the word and leave copy mode
+# 0.3 seconds later, so make them do nothing
+bind-key -T root DoubleClick1Pane select-pane -t =
+bind-key -T copy-mode-vi DoubleClick1Pane select-pane
+
+# tmux 3.8 workaround: when begin-selection has reset the selection mode to char,
+# select the original word or line again and extend it to the mouse position
+bind-key -T copy-mode-vi User900 send-keys -X other-end \; send-keys -X select-word
+bind-key -T copy-mode-vi User901 send-keys -X other-end \; send-keys -X select-line
 bind-key -T copy-mode-vi MouseDrag1Pane {
   select-pane
   if -F '#{==:#{selection_mode},word}' {
     send-keys -X begin-selection
-    send-keys -X selection-mode word
+    if -F '#{==:#{selection_mode},char}' {
+      send-keys User900
+      send-keys -X rectangle-off
+    }
   } {
     if -F '#{==:#{selection_mode},line}' {
       send-keys -X begin-selection
-      send-keys -X selection-mode line
+      if -F '#{==:#{selection_mode},char}' {
+        send-keys User901
+        send-keys -X rectangle-off
+      }
     } {
       send-keys -X begin-selection
     }
@@ -92,6 +117,14 @@ bind-key -T copy-mode-vi MouseDrag1Pane {
 }
 ```
 
-The `MouseDown1Pane` binding is required by the workaround. `clear-selection` resets the selection mode to `char` on every new click, so a later drag somewhere else starts a plain selection instead of reusing a stale `word` or `line` mode.
+Why the bindings look the way they do:
 
-I checked these bindings on tmux 3.8 only, by sending mouse events to a test server: double click then drag in both directions, triple click then drag up and down, a plain drag, and clicks without a drag all select and copy the expected text.
+- **`SecondClick1Pane`, not `DoubleClick1Pane`.** tmux sends `DoubleClick1Pane` 0.3 seconds after the second press, once it is sure that no third click follows. A drag that starts within those 0.3 seconds begins before the word is selected, so it extends by character. `SecondClick1Pane` is sent at the second press itself.
+- **`MouseDown1Pane`.** The workaround depends on it. `clear-selection` resets the selection mode to `char` on every new click, so a later drag somewhere else starts a plain selection instead of reusing a stale `word` or `line` mode.
+- **`MouseDrag1Pane`.** The drag still starts with `begin-selection`, because autoscroll on the top and bottom rows only works for a drag that tmux tracks itself. The inner `if` runs the repair only when `begin-selection` really has reset the selection mode.
+- **`User900` and `User901`.** They move the cursor to the other end of the selection, which is still inside the original word or line, and select that word or line again. A `send-keys -X` command in a mouse binding first moves the cursor to the mouse position, which would select the wrong word. Sending a key that is bound in the copy-mode table runs the same commands without that move. No keyboard produces these two keys; any unused `User` key works.
+- **`rectangle-off`.** Rectangle selection is off anyway, so the command is used only for what else it does in a mouse binding: it moves the cursor to the mouse position and recomputes the selection up to there, by word or by line.
+
+**Autoscroll on tmux 3.8.** With `mode-keys vi`, tmux 3.8 scrolls a single line when a drag is held on the top or bottom row, and then stops. This is a tmux bug that affects every drag, including a plain one with the default bindings. The fix ([tmux/tmux#5667](https://github.com/tmux/tmux/pull/5667)) came after the 3.8 release, so it takes a newer tmux, not a different binding.
+
+I checked these bindings on tmux 3.8 only, by sending mouse events to a test server. With `mode-keys vi`: double click then drag in both directions, a drag that starts right after the second click, triple click then drag up and down, drags that end on the top and bottom rows, a plain drag, and clicks without a drag all select and copy the expected text. Autoscroll I could only check with the same bindings in the `copy-mode` table under `mode-keys emacs`, where 3.8 does not have the bug: plain, word and line drags keep scrolling while the pointer rests on the top or bottom row, and stop when the button is released.
